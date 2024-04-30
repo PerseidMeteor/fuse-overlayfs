@@ -2051,26 +2051,37 @@ do_lookup_file (struct ovl_data *lo, fuse_ino_t parent, const char *name)
       for (node = pnode; node; node = node->next_link)
         if (node->parent)
           return node;
+      printf ("[DEBUG do_lookup_file] 提前返回\n");
       return pnode;
     }
 
   if (has_prefix (name, ".wh."))
     {
       errno = EINVAL;
+      printf ("[DEBUG do_lookup_file] 白化文件提前返回\n");
       return NULL;
     }
 
   node_set_name (&key, (char *) name);
   node = hash_lookup (pnode->children, &key);
+
+  // 逻辑应该加在这里，假设没找到这个node,去upperdir再找一下,
+  // 似乎看起来，强行赋值一个空值，让他主动去多层进行遍历是可行的
+  
+  node = NULL;
+  pnode->loaded = 0;
+
+  printf ("[DEBUG do_lookup_file] checkpoint1\n");
   if (node == NULL && ! pnode->loaded)
     {
       int ret;
       struct ovl_layer *it;
       struct stat st;
       bool stop_lookup = false;
-
+      printf ("[DEBUG do_lookup_file] checkpoint1.5\n");
       for (it = lo->layers; it && ! stop_lookup; it = it->next)
         {
+          printf("[DEBUG do_lookup_file] 当前layer的path为%s", it->path);
           char path[PATH_MAX];
           char whpath[PATH_MAX];
           const char *wh_name;
@@ -2079,14 +2090,16 @@ do_lookup_file (struct ovl_data *lo, fuse_ino_t parent, const char *name)
             stop_lookup = true;
 
           strconcat3 (path, PATH_MAX, pnode->path, "/", name);
-
+          printf ("[DEBUG do_lookup_file] 调用statat %s\n", path);
           ret = it->ds->statat (it, path, &st, AT_SYMLINK_NOFOLLOW, STATX_TYPE | STATX_MODE | STATX_INO);
           if (ret < 0)
             {
+              printf ("[DEBUG do_lookup_file] ret 小于0 \n");
               int saved_errno = errno;
 
               if (errno == ENOENT || errno == ENOTDIR || errno == EACCES)
                 {
+                  printf ("[DEBUG do_lookup_file] 检查errno \n");
                   if (node)
                     continue;
 
@@ -2108,6 +2121,7 @@ do_lookup_file (struct ovl_data *lo, fuse_ino_t parent, const char *name)
                   continue;
                 }
               errno = saved_errno;
+              printf ("[DEBUG do_lookup_file] checkpoint1\n");
               return NULL;
             }
 
@@ -2137,6 +2151,7 @@ do_lookup_file (struct ovl_data *lo, fuse_ino_t parent, const char *name)
           if (node == NULL)
             {
               errno = ENOMEM;
+              printf ("[DEBUG do_lookup_file] checkpoint2\n");
               return NULL;
             }
 
@@ -2146,6 +2161,7 @@ do_lookup_file (struct ovl_data *lo, fuse_ino_t parent, const char *name)
               if (ret < 0)
                 {
                   node_free (node);
+                  printf ("[DEBUG do_lookup_file] checkpoint3\n");
                   return NULL;
                 }
               if (ret > 0)
@@ -2159,11 +2175,12 @@ do_lookup_file (struct ovl_data *lo, fuse_ino_t parent, const char *name)
             {
               node_free (node);
               errno = ENOMEM;
+              printf ("[DEBUG do_lookup_file] checkpoint4\n");
               return NULL;
             }
         }
     }
-
+  printf ("[DEBUG do_lookup_file] checkpoint5\n");
   return node;
 }
 
@@ -2180,9 +2197,12 @@ ovl_lookup (fuse_req_t req, fuse_ino_t parent, const char *name)
     fprintf (stderr, "ovl_lookup(parent=%" PRIu64 ", name=%s)\n",
              parent, name);
 
+  
   memset (&e, 0, sizeof (e));
-
+  
+  printf ("[DEBUG ovl_open] 调用do_lookup_file函数\n");
   node = do_lookup_file (lo, parent, name);
+  printf ("[DEBUG ovl_open] checkpoint1\n");
   if (node == NULL || node->whiteout)
     {
       e.ino = 0;
@@ -2191,6 +2211,7 @@ ovl_lookup (fuse_req_t req, fuse_ino_t parent, const char *name)
       fuse_reply_entry (req, &e);
       return;
     }
+  printf ("[DEBUG ovl_open] checkpoint2\n");
 
   if (! lo->static_nlink && node_dirp (node))
     {
@@ -2201,6 +2222,7 @@ ovl_lookup (fuse_req_t req, fuse_ino_t parent, const char *name)
           return;
         }
     }
+  printf ("[DEBUG ovl_open] checkpoint3\n");
 
   err = rpl_stat (req, node, -1, NULL, NULL, &e.attr);
   if (err)
@@ -2213,6 +2235,7 @@ ovl_lookup (fuse_req_t req, fuse_ino_t parent, const char *name)
   node->ino->lookups++;
   e.attr_timeout = get_timeout (lo);
   e.entry_timeout = get_timeout (lo);
+  printf ("[DEBUG ovl_open] checkpoint4\n");
   fuse_reply_entry (req, &e);
 }
 
@@ -3638,6 +3661,7 @@ ovl_do_open (fuse_req_t req, fuse_ino_t parent, const char *name, int flags, mod
   gid_t gid;
   bool need_delete_whiteout = true;
   bool is_whiteout = false;
+  printf ("2[DEBUG] 尝试打开文件%s\n", name);
 
   flags |= O_NOFOLLOW;
 
@@ -3653,16 +3677,18 @@ ovl_do_open (fuse_req_t req, fuse_ino_t parent, const char *name, int flags, mod
       if (flags & O_APPEND)
         flags &= ~O_APPEND;
     }
-
+printf ("[DEBUG] 1尝试打开文件%s\n", name);
   if (name && has_prefix (name, ".wh."))
     {
       errno = EINVAL;
       return -1;
     }
 
+  printf ("[DEBUG] 3尝试打开文件%s\n", name);
   n = do_lookup_file (lo, parent, name);
   if (n && n->hidden)
     {
+      printf ("[DEBUG] 4尝试打开文件%s\n", name);
       if (retnode)
         *retnode = n;
 
@@ -3670,17 +3696,23 @@ ovl_do_open (fuse_req_t req, fuse_ino_t parent, const char *name, int flags, mod
     }
   if (n && ! n->whiteout && (flags & O_CREAT))
     {
+              printf ("[DEBUG] 5尝试打开文件%s\n", name);
+
       errno = EEXIST;
       return -1;
     }
   if (n && n->whiteout)
     {
+      printf ("[DEBUG] 6尝试打开文件%s\n", name);
+
       n = NULL;
       is_whiteout = true;
     }
 
   if (! n)
     {
+      printf ("[DEBUG] 4尝试打开文件%s\n", name);
+
       int ret;
       struct ovl_node *p;
       const struct fuse_ctx *ctx = fuse_req_ctx (req);
@@ -3689,6 +3721,8 @@ ovl_do_open (fuse_req_t req, fuse_ino_t parent, const char *name, int flags, mod
 
       if ((flags & O_CREAT) == 0)
         {
+          printf ("[DEBUG] 5尝试打开文件%s\n", name);
+
           errno = ENOENT;
           return -1;
         }
@@ -3696,6 +3730,8 @@ ovl_do_open (fuse_req_t req, fuse_ino_t parent, const char *name, int flags, mod
       p = do_lookup_file (lo, parent, NULL);
       if (p == NULL)
         {
+          printf ("[DEBUG] 6尝试打开文件%s\n", name);
+
           errno = ENOENT;
           return -1;
         }
@@ -3736,6 +3772,8 @@ ovl_do_open (fuse_req_t req, fuse_ino_t parent, const char *name, int flags, mod
       n = make_ovl_node (lo, path, get_upper_layer (lo), name, st->st_ino, st->st_dev, false, p, lo->fast_ino_check);
       if (n == NULL)
         {
+          printf ("[DEBUG] 7尝试打开文件%s\n", name);
+
           errno = ENOMEM;
           return -1;
         }
@@ -3959,10 +3997,13 @@ ovl_open (fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
   struct ovl_data *lo = ovl_data (req);
   cleanup_lock int l = enter_big_lock ();
   cleanup_close int fd = -1;
+  printf ("[DEBUG] 尝试打开文件c\n");
 
   if (UNLIKELY (ovl_debug (req)))
     fprintf (stderr, "ovl_open(ino=%" PRIu64 ")\n", ino);
 
+  // fprintf ("[DEBUG] 尝试打开文件a\n");
+  printf ("[DEBUG] 尝试打开文件a\n");
   fd = ovl_do_open (req, ino, NULL, fi->flags, 0700, NULL, NULL);
   if (fd < 0)
     {
@@ -3974,6 +4015,8 @@ ovl_open (fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
     fi->keep_cache = 1;
   fd = -1; /* Do not clean it up.  */
   fuse_reply_open (req, fi);
+    // fprintf ("[DEBUG] 尝试打开文件b\n");
+  printf ("[DEBUG] 尝试打开文件b\n");
 }
 
 static void

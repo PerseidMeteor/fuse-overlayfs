@@ -103,6 +103,7 @@ direct_statat (struct ovl_layer *l, const char *path, struct stat *st, int flags
 #ifdef HAVE_STATX
   struct statx stx;
 
+  printf("[DEBUG direct_statat] checkpoint1, path is %s\n", path);
   ret = statx (l->fd, path, AT_STATX_DONT_SYNC | flags, mask, &stx);
   if (ret < 0 && (errno == ENOSYS || errno == EINVAL))
     goto fallback;
